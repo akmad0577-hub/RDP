@@ -1,0 +1,56 @@
+name: RDP over Tailscale
+
+# Save as .github/workflows/rdp.yml, then start it from the Actions tab (Run workflow).
+on:
+  workflow_dispatch:
+    inputs:
+      minutes:
+        description: "How long to keep the session alive (max 350)"
+        default: "180"
+
+jobs:
+  rdp:
+    runs-on: windows-latest
+    timeout-minutes: 360   # GitHub hard limit per job
+
+    steps:
+      - name: Enable Remote Desktop and set password
+        shell: pwsh
+        env:
+          RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
+        run: |
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections -Value 0
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name UserAuthentication -Value 1
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+          # Let the built-in runner account log in over RDP
+          Set-LocalUser -Name "runneradmin" -Password (ConvertTo-SecureString -AsPlainText $env:RDP_PASSWORD -Force)
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "runneradmin" -ErrorAction SilentlyContinue
+          Restart-Service -Name TermService -Force
+
+      - name: Connect to Tailscale
+        uses: tailscale/github-action@v3
+        with:
+          authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
+          hostname: gh-rdp-${{ github.run_id }}
+
+      - name: Show connection details
+        shell: pwsh
+        run: |
+          $ip = (tailscale ip -4).Trim()
+          Write-Host "======================================"
+          Write-Host " RDP address : $ip"
+          Write-Host " Username    : runneradmin"
+          Write-Host " Password    : (your RDP_PASSWORD secret)"
+          Write-Host "======================================"
+
+      - name: Keep session alive
+        shell: pwsh
+        run: |
+          $minutes = [int]"${{ github.event.inputs.minutes }}"
+          if ($minutes -gt 350) { $minutes = 350 }
+          $end = (Get-Date).AddMinutes($minutes)
+          Write-Host "Session stays up until $end. To end it early, create the file C:\stop.txt inside the RDP session."
+          while ((Get-Date) -lt $end) {
+            if (Test-Path "C:\stop.txt") { Write-Host "Stop file found, shutting down."; break }
+            Start-Sleep -Seconds 30
+          }
